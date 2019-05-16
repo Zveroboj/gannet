@@ -1,0 +1,333 @@
+---
+title: "Gannet: Predicting Churn (Technical Report)"
+author: "Oleg Polishchuk"
+date: "May 16, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment
+
+Train and evaluate a model predicting if a client will stop running an advertising campaign.
+
+## Methodology
+
+Steps in the analysis:
+
+1. Clean data
+2. Conduct brief exploratory analysis
+3. Train and evaluate models:
+- Logit
+- Random Forest
+
+4. Recommend the best model
+
+
+```{r echo=FALSE}
+suppressPackageStartupMessages(suppressWarnings(library(dplyr)))
+suppressPackageStartupMessages(suppressWarnings(library(neuralnet)))
+suppressPackageStartupMessages(suppressWarnings(library(MASS)))
+suppressPackageStartupMessages(suppressWarnings(library(nnet)))
+suppressPackageStartupMessages(suppressWarnings(library(ggplot2)))
+suppressPackageStartupMessages(suppressWarnings(library(caret)))
+suppressPackageStartupMessages(suppressWarnings(library(randomForest)))
+suppressPackageStartupMessages(suppressWarnings(library(rpart.plot)))
+suppressPackageStartupMessages(suppressWarnings(library(partykit)))
+suppressPackageStartupMessages(suppressWarnings(library(rpart)))
+suppressPackageStartupMessages(suppressWarnings(library(forecast)))
+suppressPackageStartupMessages(suppressWarnings(library(esquisse)))
+suppressPackageStartupMessages(suppressWarnings(library(lmtest)))
+suppressPackageStartupMessages(suppressWarnings(library(mfx)))
+suppressPackageStartupMessages(suppressWarnings(library(corrplot)))
+suppressPackageStartupMessages(suppressWarnings(library(Hmisc)))
+suppressPackageStartupMessages(suppressWarnings(library(gridExtra)))
+suppressPackageStartupMessages(suppressWarnings(library(rcompanion)))
+
+```
+
+
+
+```{r echo=FALSE}
+####Get and Clean Data####
+setwd("C:/Users/Owner/Documents/Consulting/ds_modeling_challenge/assets")
+dta <- read.csv("data.csv", na.strings = c("", "!DIV/0","!N/A", "NA"), 
+                header = F) 
+nms <- read.table("header.txt", sep = ",")
+names(dta) <- nms[,1]
+dta <- dta[complete.cases(dta),] # remove incmplete records
+
+```
+
+## Exploratory Analysis
+
+Brief exploratory analysis is necessary to understand basic interrelationships in the data set. Test are run for two types of data:
+
+1. Numeric vs. Binary variables - Spearman correlation
+2. Nominal vs. Binary variables - Proportions test  
+
+#### Correlations
+The correlation plot below presents results of Spearman correlations. Significant correlations are highlighted:
+
+```{r pressure, echo=FALSE}
+corrplot::corrplot(cor(dta[,c(1,3:8,10)]),
+                   method='shade',shade.col = NA,
+                   addCoef.col = 'black',addgrid.col='grey',
+                   order = 'original',number.cex = .5,diag = F,
+                   number.font = 2,cl.cex = 0.25,
+                   addCoefasPercent=F,
+                   p.mat = as.matrix(rcorr(as.matrix(dta[,c(1,3:8,10)]),
+                                           type="spearman")$P),
+                   sig.level = 0.05,
+                   insig = c("blank"),
+                   #col = RColorBrewer::brewer.pal(6,"Blues"),
+                   tl.col = 'navy',tl.srt = 90,tl.cex = .7,
+                   cl.pos='n',na.label = 'square',na.label.col = 'white')
+
+
+
+```
+
+Based on the analysis, **four** variables correlate with the output variable *churn* (and can be included in the logit model):
+
+- *duration*
+- *avg_budget*
+- *CPL_wrt_self*
+- *num_prods*
+
+####Proportion Test
+
+Proportion test can be used for testing the null that the proportions (probabilities of retention) in several groups are the same. It may help understand if it makes sense to include categorical variables in the modelling exercise. 
+
+```{r echo=FALSE}
+
+##BC
+dta.p <- dta[,c("BC","churn")]
+
+df2 <- dta.p %>% group_by(BC) %>% summarise_all(length)
+dta.p2 <- as.data.frame(df2)
+dta.p2 <- dta.p2[order(rank(dta.p2$churn)),]
+dta.pc <- dta.p[dta.p$BC!='Government & Politics'&
+                  dta.p$BC!='Business Opportunities'&
+                  dta.p$BC!="Community, Garage Sales & Organizations" &
+                  dta.p$BC!='Religion & Spirituality'&
+                  dta.p$BC!='Farming & Agriculture'&
+                  dta.p$BC!='Career & Employment'&
+                  dta.p$BC!='Toys & Hobbies',] 
+dta.pc1 <- as.data.frame(dta.pc)
+dta.pc1$BC<-as.character(dta.pc1$BC)
+dta.tbl <- table(dta.pc1$BC, dta.pc1$churn)
+
+pr.t <-suppressWarnings( prop.test(dta.tbl, p = NULL,
+          alternative = c("two.sided"),
+          conf.level = 0.95, correct = TRUE))
+est.pr <- as.data.frame(pr.t$estimate)
+est.pr$BC <-row.names(dta.tbl)
+names(est.pr)[1] <- "Proportion of Retained"
+
+est.pr <- dplyr::select(est.pr, BC, `Proportion of Retained`)
+est.pr <- data.frame(est.pr, row.names = NULL)
+est.pr <- est.pr[order(-rank(est.pr$Proportion.of.Retained)),]
+
+g.p<-ggplot(est.pr, aes(y=Proportion.of.Retained, x=reorder(BC, Proportion.of.Retained)))+geom_bar(stat = 'identity')+coord_flip()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs(x="States", y="Proportion of Clients Retained")
+
+p.v.prop<- round(pr.t$p.value,3)
+
+##States
+dta.p <- dta[,c("client_state","churn")]
+
+df2 <- dta.p %>% group_by(client_state) %>% summarise_all(length)
+dta.p2 <- as.data.frame(df2)
+dta.p2 <- dta.p2[order(rank(dta.p2$churn)),]
+
+dta.tt <- table(dta$client_state,factor(dta$churn))
+
+pr.t2 <- suppressWarnings(prop.test(dta.tt, p = NULL,
+          alternative = c("two.sided"),
+          conf.level = 0.95, correct = TRUE))
+est.pr2 <- as.data.frame(pr.t2$estimate)
+est.pr2$State <-row.names(dta.tt)
+names(est.pr2)[1] <- "Proportion of Retained"
+
+est.pr2 <- dplyr::select(est.pr2, State, `Proportion of Retained`)
+est.pr2 <- data.frame(est.pr2, row.names = NULL)
+est.pr2 <- est.pr2[order(-rank(est.pr2$Proportion.of.Retained)),]
+
+g.p2<-ggplot(est.pr2, aes(y=Proportion.of.Retained, x=reorder(State, Proportion.of.Retained)))+geom_bar(stat = 'identity')+coord_flip()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs(x="States", y="Proportion of Clients Retained")
+
+
+p.v.prop2<-round(pr.t2$p.value,3)
+
+g.p
+g.p2
+```
+
+It appears the differences in proportions of retained clients by business categories and states are significant, i.e., p value (BC) = `r p.v.prop`, p.value (client_state) = `r p.v.prop2`. 
+We may consider including both variables, i.e., *BC* and *client_state*, in a classification model.
+
+## Logit
+
+```{r echo=FALSE}
+dta.lg <- dta[,c(1,3:8,10)]
+for (i in 1:dim(dta.lg)[2]){
+  dta.lg[,i]<-as.numeric(dta.lg[,i])
+}
+#Build a null model
+model.null <- suppressWarnings( glm(churn ~ 1, 
+                  data=dta.lg,
+                  family = binomial(link="logit")
+))
+
+#Build a complete model
+
+model.full <- suppressWarnings(glm(churn ~ .,
+                  data=dta.lg,
+                  family = binomial(link="logit")
+))
+
+#look for the best fit model:
+best.fit<- suppressWarnings(step(model.null,
+               scope = list(upper=model.full),
+               direction="both",
+               test="Chisq",trace = F,
+               data=dta.lg))
+
+final.formula<-best.fit$formula
+
+model.final<- suppressWarnings(glm(formula = final.formula, family = binomial(link = "logit"), 
+                 data = dta.lg))
+
+
+McFadden.pseudo.R<-1-(as.numeric(logLik(model.final)/logLik(model.null)))
+mcF<-paste(round(McFadden.pseudo.R*100,2),"%", sep = '')
+
+fdf<-rcompanion::nagelkerke(model.final)
+mcF<-paste(round(min(fdf$Pseudo.R.squared.for.model.vs.null)*100,2),'%',sep = '')
+mcH<-paste(round(max(fdf$Pseudo.R.squared.for.model.vs.null)*100,2),'%',sep = "")
+
+```
+
+Given the binary format of the output variable, a logit model would be a natural start. However, based on the logit analysis, the logit model is rather weak and explains only between `r mcF` and `r mcH` of variance in *churn*. 
+
+```{r echo=FALSE}
+suppressWarnings(summary(model.final))
+suppressWarnings(fdf$Pseudo.R.squared.for.model.vs.null)
+
+```
+
+A chart below presents marginal effects, i.e., the change in probability when an independent variable increases by one unit:
+
+```{r echo=FALSE}
+
+prob<-suppressWarnings(logitmfx(churn ~ . , data=dta.lg) )
+prob.table<-cbind("Change in probability of Y"=prob$mfxest[,1],
+                  "Lower Confidence Limit"=prob$mfxest[,1]-1.96*prob$mfxest[,2],
+                  "Upper Confidence Limit"=prob$mfxest[,1]+1.96*prob$mfxest[,2],
+                  "P-value" = prob$mfxest[,4])
+
+prob.table<-as.data.frame(prob.table)
+prob.table<-data.frame(cbind(row.names(prob$mfxest),prob.table),row.names = NULL)
+names(prob.table)<-c("Variables","Change in probability of Y","Lower CI Limit",
+                     "Upper CI Limit", "P-value")
+sm.prob.table<-prob.table[prob.table$`P-value`<=0.05,]
+#knitr::kable(sm.prob.table)
+ggplot(sm.prob.table, aes(x=sm.prob.table$Variables, 
+                          y = sm.prob.table$`Change in probability of Y`)) +   
+  geom_errorbar(aes(ymin = sm.prob.table$`Lower CI Limit`, 
+                    ymax = sm.prob.table$`Upper CI Limit`), 
+                width = 0.5, lty=1, lwd=.45, col="red") + #geom_hline(yintercept = 0, color="black")+
+  coord_flip()+ 
+  geom_point(shape=20, size=3, fill="black") +  
+  geom_segment(aes(yend=sm.prob.table$`Change in probability of Y`),
+               xend=0, colour="grey50",
+               lineend = "round", size=.35, linetype=2)+ 
+  geom_text(aes(label=paste(round(sm.prob.table$`Change in probability of Y`,3)*100,"%",
+                            sep = '')),
+            cex=2, hjust=0,vjust=-1.5,color="black")+
+  labs(title= "Marginal Effect(s)", 
+       subtitle="Change in Probability of Output if Predictor Changes by 1 
+(Red error bar shows a 95% confidence interval around estimate of probability)",
+       x="Predictors", y="Probability", 
+       caption = "") +   
+  theme(plot.title = element_text(family = "sans", face="bold", 
+                                  size=13),     
+        axis.title = element_text(family = "sans", size=9),
+        plot.caption = element_text(family = "sans", size=5)) 
+    
+```
+
+## Machine Learning: Random Forest
+
+Given the poor results from the logit model and significant difference in *churn* by state and business category (based on proportions test), we can attempt classification analysis. 
+
+```{r echo=FALSE}
+set.seed(5)
+TI <- createDataPartition(y=dta$churn, p=0.75, list=FALSE)
+tra<- dta[TI,]
+val<- dta[-TI,]
+
+modFit <- randomForest(factor(churn) ~., data = tra, importance=T,proximity=T)
+
+cm<-confusionMatrix(predict(modFit,val),
+                    factor(val$churn))
+modFit
+cm
+acc.rf <- paste(round(cm$overall[1]*100,1),'%', sep = '')
+sens.rf <- paste(round(cm$byClass[1]*100,1),'%', sep = '')
+spec.rf <- paste(round(cm$byClass[2]*100,1),'%', sep = '')
+p.rf<-round(cm$overall[6],3)
+
+```
+
+Model results:
+
+- **Overall Accuracy** of the model is `r acc.rf`
+- **P-value** of the model is `r p.rf`.
+- **Model's sensitivity**, i.e.,  the percentage of retained clients that are correctly identified as such, is `r sens.rf`. 
+- **Model's specifity**, i.e., the percentage of churned clients who are correctly identified as such, is `r spec.rf`.
+
+A chart below presents the most impactful variables in the random forest model:
+
+```{r echo=FALSE}
+im<-as.data.frame(importance(modFit, scale = T))
+im$Activity<-row.names(im)
+im<-dplyr::select(im, Activity, `MeanDecreaseGini`)
+names(im)<-c("Activity","Mean Decrease Gini")
+
+
+t<-head(arrange(im, desc(`Mean Decrease Gini`)),10)
+
+ggplot(t, aes(x=`Mean Decrease Gini`,
+              y=reorder(Activity,`Mean Decrease Gini`)))+geom_point()+
+  labs(x="Mean Decrease Gini", y="Variables", title="Mean Decrease Gini")
+
+```
+
+
+##Recommendations
+
+Given the results of the analysis, it is recommended to use machine learning techniques, i.e., random forest, to predict churn/retention. If possible, it  might be helpful to add additional variables to the model to improve its predicive power.
+
+Additionally, depending on the available processing power, training a neural networks-based model might be a good next step to produce better results.
+
+## Appendix
+
+The list of variables available for analysis is provided below:
+
+- CPL_wrt_BC - change in cost per lead with respect to business category
+- client_state - client's location
+- duration - how long the client has been running advertising campaigns in months
+- num_prods - how many distinct advertising products the client has bought
+- calls - number of calls received
+- CPL_wrt_self - change in client's cost per lead in the past three months
+- churn - target column (0=retention | 1=churn)
+- avg_budget - average monthly budget spent on advertising campaigns
+- BC - client's business category
+- clicks - number of clicks received
+
